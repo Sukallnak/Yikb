@@ -1,0 +1,1427 @@
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import {
+  VW,
+  VH,
+  MAP_W,
+  MAP_H,
+  createWorld,
+  makeInput,
+  render,
+  update,
+  tryPickupItems,
+  useArrow,
+  useDisc,
+  useRequiemArrow,
+  useBluePebble,
+  useStrangeHat,
+  useGreenArrow,
+  useGreenBaby,
+  toggleStandActive,
+  tryUseDisc,
+  teleportToShard,
+  closeShardPicker,
+  exportSave,
+  applySave,
+  activatePrimeHeal,
+  talkToBoingo,
+  type InputState,
+} from "@/game/engine";
+import { STANDS, SHIT_ABILITY, TIER_BASE_PCT, standRollPct, type StandRarity } from "@/game/stands";
+import { STAND_CODEX } from "@/game/codex";
+import { unlockAudio, isSoundEnabled, setSoundEnabled } from "@/game/sound";
+import { startMusic, applyMusicSetting } from "@/game/music";
+import type { World } from "@/game/engine";
+
+interface UIData {
+  standId: keyof typeof STANDS;
+  shitVariant: boolean;
+  arrows: number;
+  discs: number;
+  hp: number;
+  maxHp: number;
+  cd: { m1: number; a1: number; a2: number; a3: number; a4: number };
+  banner: string | null;
+  banners: { id: number; text: string }[];
+  kills: number;
+  rage: number;
+  rageActive: boolean;
+  echoesAct: number;
+  timeStopActive: boolean;
+  pilotActive: boolean;
+  shardPickerOpen: boolean;
+  shards: { id: number; pos: { x: number; y: number } }[];
+  whiteAlbumBar: number;
+  whiteAlbumActive: boolean;
+  cleanslyActive: boolean;
+  cleanslyFrac: number;
+  boingoNearby: boolean;
+  boingoAlive: boolean;
+  requiemArrows: number;
+  bluePebbles: number;
+  tonthCopies: number;
+  strangeHats: number;
+  greenArrows: number;
+  greenBabies: number;
+  sptwRage: number;
+  toast: string | null;
+  standsUnlocked: string[];
+}
+
+export default function Game() {
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const wrapRef = useRef<HTMLDivElement | null>(null);
+  const worldRef = useRef<World | null>(null);
+  const inputRef = useRef<InputState>(makeInput());
+  const arrowsRef = useRef(0);
+  const discsRef = useRef(0);
+  const [ui, setUi] = useState<UIData>({
+    standId: "none",
+    shitVariant: false,
+    arrows: 0,
+    discs: 0,
+    hp: 100,
+    maxHp: 100,
+    cd: { m1: 0, a1: 0, a2: 0, a3: 0, a4: 0 },
+    banner: null,
+    banners: [],
+    kills: 0,
+    rage: 0,
+    rageActive: false,
+    echoesAct: 1,
+    timeStopActive: false,
+    pilotActive: false,
+    shardPickerOpen: false,
+    shards: [],
+    whiteAlbumBar: 100,
+    whiteAlbumActive: true,
+    cleanslyActive: false,
+    cleanslyFrac: 0,
+    boingoNearby: false,
+    boingoAlive: true,
+    requiemArrows: 0,
+    bluePebbles: 0,
+    tonthCopies: 0,
+    strangeHats: 0,
+    greenArrows: 0,
+    greenBabies: 0,
+    sptwRage: 0,
+    toast: null,
+    standsUnlocked: [],
+  });
+  const [boingoOpen, setBoingoOpen] = useState(false);
+  const [bookPage, setBookPage] = useState<1 | 2>(1);
+  const [inventoryOpen, setInventoryOpen] = useState(false);
+  const [invTab, setInvTab] = useState<"items" | "map" | "howto" | "changelog">("items");
+  const [soundOn, setSoundOn] = useState<boolean>(isSoundEnabled());
+  const [showHelp, setShowHelp] = useState<boolean>(false);
+  const [bagHintUntil, setBagHintUntil] = useState<number>(() => Date.now() + 10000);
+  const [, forceTick] = useState(0);
+  useEffect(() => {
+    const id = window.setInterval(() => forceTick((t) => t + 1), 250);
+    return () => window.clearInterval(id);
+  }, []);
+
+  // Joystick state
+  const joyRef = useRef<{ active: boolean; baseX: number; baseY: number; pointerId: number | null }>({
+    active: false, baseX: 0, baseY: 0, pointerId: null,
+  });
+  const aimRef = useRef<{ active: boolean; pointerId: number | null }>({ active: false, pointerId: null });
+
+  useEffect(() => {
+    const canvas = canvasRef.current!;
+    const ctx = canvas.getContext("2d")!;
+    canvas.width = VW;
+    canvas.height = VH;
+    worldRef.current = createWorld();
+    // Auto-load save on boot
+    try {
+      const raw = localStorage.getItem("standtest.save.v1");
+      if (raw) {
+        const got = applySave(worldRef.current, JSON.parse(raw));
+        arrowsRef.current = got.arrows;
+        discsRef.current = got.discs;
+      }
+    } catch { /* ignore */ }
+
+    let raf = 0;
+    let last = performance.now();
+    let acc = 0;
+    const STEP = 1 / 60;
+    let uiTick = 0;
+
+    const loop = (now: number) => {
+      raf = requestAnimationFrame(loop);
+      if (document.hidden) { last = now; return; }
+      let dt = (now - last) / 1000;
+      last = now;
+      if (dt > 0.1) dt = 0.1;
+      acc += dt;
+      while (acc >= STEP) {
+        update(worldRef.current!, inputRef.current, STEP);
+        // pickups
+        const got = tryPickupItems(worldRef.current!);
+        if (got.arrows) arrowsRef.current += got.arrows;
+        if (got.discs) discsRef.current += got.discs;
+        acc -= STEP;
+      }
+      render(ctx, worldRef.current!);
+
+      uiTick++;
+      if (uiTick % 4 === 0) {
+        const w = worldRef.current!;
+        setUi({
+          standId: w.standId,
+          shitVariant: w.shitVariant,
+          arrows: arrowsRef.current,
+          discs: discsRef.current,
+          hp: Math.max(0, Math.round(w.player.hp)),
+          maxHp: w.player.maxHp,
+          cd: { ...w.cdTimers },
+          banner: w.bannerText,
+          banners: w.banners.map((b) => ({ id: b.id, text: b.text })),
+          kills: w.kills,
+          rage: Math.round(w.rage),
+          rageActive: w.time < w.rageUntil,
+          echoesAct: w.echoesAct,
+          timeStopActive: w.time < w.timeStopUntil,
+          pilotActive: w.pilotActive || w.puppetPiloted || w.purpleHazeActive,
+          shardPickerOpen: w.shardPickerOpen,
+          shards: w.shards.map((s) => ({ id: s.id, pos: { ...s.pos } })),
+          whiteAlbumBar: Math.round(w.whiteAlbumBar),
+          whiteAlbumActive: w.whiteAlbumActive,
+          cleanslyActive: w.time < w.cleanslyUntil,
+          cleanslyFrac: w.cleanslyDuration > 0 ? Math.max(0, (w.cleanslyUntil - w.time) / w.cleanslyDuration) : 0,
+          boingoNearby: w.boingo.alive && Math.hypot(w.player.pos.x - w.boingo.pos.x, w.player.pos.y - w.boingo.pos.y) < 26,
+          boingoAlive: w.boingo.alive,
+          requiemArrows: w.requiemArrowCount,
+          bluePebbles: w.bluePebbleCount,
+          tonthCopies: w.tonthCopyCount,
+          strangeHats: w.strangeHatCount,
+          greenArrows: w.greenArrowCount ?? 0,
+          greenBabies: w.greenBabyCount ?? 0,
+          sptwRage: Math.round(w.sptwRage),
+          standsUnlocked: (w.standsUnlocked ?? []) as string[],
+          toast: w.toastText,
+        });
+      }
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, []);
+
+  // Keyboard for desktop
+  useEffect(() => {
+    const keys = new Set<string>();
+    const onDown = (e: KeyboardEvent) => {
+      unlockAudio();
+      if (keys.has(e.key.toLowerCase())) return; // ignore key-repeat
+      keys.add(e.key.toLowerCase());
+      const k = e.key.toLowerCase();
+      if (k === "1") inputRef.current.pressed.a1 = true;
+      if (k === "2") inputRef.current.pressed.a2 = true;
+      if (k === "3") inputRef.current.pressed.a3 = true;
+      if (k === "4") inputRef.current.pressed.a4 = true;
+      if (k === "p" && worldRef.current) activatePrimeHeal(worldRef.current);
+      if (k === " " || k === "f") {
+        inputRef.current.pressed.m1 = true;
+        inputRef.current.m1Held = true;
+      }
+      inputRef.current.sprint = keys.has("shift");
+      updateKeyJoy();
+    };
+    const onUp = (e: KeyboardEvent) => {
+      keys.delete(e.key.toLowerCase());
+      const k = e.key.toLowerCase();
+      if (k === " " || k === "f") inputRef.current.m1Held = false;
+      inputRef.current.sprint = keys.has("shift");
+      updateKeyJoy();
+    };
+    function updateKeyJoy() {
+      let x = 0, y = 0;
+      if (keys.has("arrowleft") || keys.has("a")) x -= 1;
+      if (keys.has("arrowright") || keys.has("d")) x += 1;
+      if (keys.has("arrowup") || keys.has("w")) y -= 1;
+      if (keys.has("arrowdown") || keys.has("s")) y += 1;
+      const m = Math.hypot(x, y);
+      if (m > 0) { x /= m; y /= m; inputRef.current.joyActive = true; }
+      else inputRef.current.joyActive = false;
+      inputRef.current.joy.x = x;
+      inputRef.current.joy.y = y;
+    }
+    window.addEventListener("keydown", onDown);
+    window.addEventListener("keyup", onUp);
+    return () => { window.removeEventListener("keydown", onDown); window.removeEventListener("keyup", onUp); };
+  }, []);
+
+  // Joystick handlers (left half of screen)
+  const onJoyStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    unlockAudio();
+    startMusic();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    joyRef.current.active = true;
+    joyRef.current.baseX = e.clientX;
+    joyRef.current.baseY = e.clientY;
+    joyRef.current.pointerId = e.pointerId;
+    inputRef.current.joyActive = true;
+  };
+  const onJoyMove = (e: React.PointerEvent) => {
+    if (!joyRef.current.active || joyRef.current.pointerId !== e.pointerId) return;
+    const dx = e.clientX - joyRef.current.baseX;
+    const dy = e.clientY - joyRef.current.baseY;
+    const max = 50;
+    const m = Math.hypot(dx, dy);
+    const cx = m > max ? (dx / m) * max : dx;
+    const cy = m > max ? (dy / m) * max : dy;
+    inputRef.current.joy.x = cx / max;
+    inputRef.current.joy.y = cy / max;
+  };
+  const onJoyEnd = (e: React.PointerEvent) => {
+    if (joyRef.current.pointerId !== e.pointerId) return;
+    joyRef.current.active = false;
+    joyRef.current.pointerId = null;
+    inputRef.current.joyActive = false;
+    inputRef.current.joy.x = 0;
+    inputRef.current.joy.y = 0;
+  };
+
+  const setAimFromPointer = (e: React.PointerEvent) => {
+    const canvas = canvasRef.current;
+    const w = worldRef.current;
+    if (!canvas || !w) return;
+    const rect = canvas.getBoundingClientRect();
+    const sx = ((e.clientX - rect.left) / rect.width) * VW;
+    const sy = ((e.clientY - rect.top) / rect.height) * VH;
+    const dx = sx - VW / 2;
+    const dy = sy - VH / 2;
+    const m = Math.hypot(dx, dy);
+    if (m > 8) inputRef.current.aim = { x: dx / m, y: dy / m };
+  };
+  const onAimStart = (e: React.PointerEvent) => {
+    e.preventDefault();
+    unlockAudio();
+    (e.target as HTMLElement).setPointerCapture(e.pointerId);
+    aimRef.current = { active: true, pointerId: e.pointerId };
+    setAimFromPointer(e);
+  };
+  const onAimMove = (e: React.PointerEvent) => {
+    if (!aimRef.current.active || aimRef.current.pointerId !== e.pointerId) return;
+    setAimFromPointer(e);
+  };
+  const onAimEnd = (e: React.PointerEvent) => {
+    if (aimRef.current.pointerId !== e.pointerId) return;
+    aimRef.current = { active: false, pointerId: null };
+    // CRITICAL: clear the aim vector so M1/abilities fall back to auto-aim.
+    // Otherwise the last drag direction stays "stuck" forever and M1 swings into empty air.
+    inputRef.current.aim = null;
+  };
+
+  const press = (key: "m1" | "a1" | "a2" | "a3" | "a4") => () => {
+    unlockAudio();
+    inputRef.current.pressed[key] = true;
+  };
+  const m1HoldStart = () => { unlockAudio(); inputRef.current.pressed.m1 = true; inputRef.current.m1Held = true; };
+  const m1HoldEnd = () => { inputRef.current.m1Held = false; };
+
+  const onUseArrow = () => {
+    if (arrowsRef.current <= 0 || !worldRef.current) return;
+    // Only consume the arrow if the engine actually accepted it (e.g. no stand equipped).
+    const ok = useArrow(worldRef.current);
+    if (ok) arrowsRef.current--;
+  };
+  const onUseDisc = () => {
+    if (discsRef.current <= 0 || !worldRef.current) return;
+    if (worldRef.current.standId === "none") return;
+    const check = tryUseDisc(worldRef.current);
+    if (!check.ok) return;
+    discsRef.current--;
+    useDisc(worldRef.current);
+  };
+  const onUseRequiem = () => {
+    if (!worldRef.current || worldRef.current.requiemArrowCount <= 0) return;
+    useRequiemArrow(worldRef.current);
+  };
+  const onUsePebble = () => {
+    if (!worldRef.current || worldRef.current.bluePebbleCount <= 0) return;
+    useBluePebble(worldRef.current);
+  };
+  const onUseTonth = () => {
+    if (!worldRef.current || worldRef.current.tonthCopyCount <= 0) return;
+    setBoingoOpen(true); // Tonth Copy opens the book without Boingo speaking
+  };
+  const onUseStrangeHat = () => {
+    if (!worldRef.current || worldRef.current.strangeHatCount <= 0) return;
+    useStrangeHat(worldRef.current);
+  };
+  const onUseGreenArrow = () => {
+    if (!worldRef.current || (worldRef.current.greenArrowCount ?? 0) <= 0) return;
+    useGreenArrow(worldRef.current);
+  };
+  const onUseGreenBaby = () => {
+    if (!worldRef.current || (worldRef.current.greenBabyCount ?? 0) <= 0) return;
+    useGreenBaby(worldRef.current);
+  };
+  const onPressRage = () => {
+    if (!worldRef.current) return;
+    inputRef.current.pressed.a4 = false;
+    // SPTW rage is bound to a4 with kind "sptw_rage" — but a4 is "Launch" in our table.
+    // Trigger a dedicated input flag instead by directly mutating state.
+    const w = worldRef.current;
+    if (w.standId !== "sptw" || w.sptwRage < 100) return;
+    w.sptwRage = 0;
+    w.rageUntil = w.time + 6;
+    w.bannerText = "RAGE";
+    w.bannerUntil = w.time + 1.2;
+  };
+  const onTalkBoingo = () => {
+    if (!worldRef.current) return;
+    talkToBoingo(worldRef.current); // grants Tonth Copy + despawns Boingo
+    setBoingoOpen(true);
+  };
+  const onToggleStand = () => {
+    if (!worldRef.current) return;
+    unlockAudio();
+    toggleStandActive(worldRef.current);
+  };
+  const onPrimeHeal = () => {
+    if (!worldRef.current) return;
+    unlockAudio();
+    activatePrimeHeal(worldRef.current);
+  };
+
+  const SAVE_KEY = "standtest.save.v1";
+  const onSave = () => {
+    if (!worldRef.current) return;
+    const data = exportSave(worldRef.current, arrowsRef.current, discsRef.current);
+    try { localStorage.setItem(SAVE_KEY, JSON.stringify(data)); } catch { /* quota */ }
+  };
+  const onLoad = () => {
+    if (!worldRef.current) return;
+    try {
+      const raw = localStorage.getItem(SAVE_KEY);
+      if (!raw) return;
+      const data = JSON.parse(raw);
+      const got = applySave(worldRef.current, data);
+      arrowsRef.current = got.arrows;
+      discsRef.current = got.discs;
+    } catch { /* corrupt */ }
+  };
+
+  // Autosave every 30s + on visibility hide / page unload
+  useEffect(() => {
+    const id = window.setInterval(() => onSave(), 30000);
+    const onVis = () => { if (document.hidden) onSave(); };
+    const onUnload = () => onSave();
+    document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("beforeunload", onUnload);
+    window.addEventListener("pagehide", onUnload);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("beforeunload", onUnload);
+      window.removeEventListener("pagehide", onUnload);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const stand = STANDS[ui.standId as keyof typeof STANDS];
+  const a4 = ui.standId === "echoes" && ui.shitVariant ? SHIT_ABILITY : stand.abilities.a4;
+  const abilities = {
+    m1: stand.abilities.m1,
+    a1: stand.abilities.a1,
+    a2: stand.abilities.a2,
+    a3: stand.abilities.a3,
+    a4,
+  };
+
+  const cdFrac = (key: "m1" | "a1" | "a2" | "a3" | "a4") => {
+    const ab = abilities[key];
+    if (!ab.cooldown) return 0;
+    return Math.min(1, ui.cd[key] / ab.cooldown);
+  };
+
+  const standColor = stand.color;
+
+  return (
+    <div
+      ref={wrapRef}
+      className="relative w-full h-[100dvh] overflow-hidden select-none touch-none"
+      style={{ background: "#000", fontFamily: "monospace" }}
+    >
+      {/* Canvas — scaled to fit portrait */}
+      <div className="absolute inset-0 flex items-center justify-center">
+        <canvas
+          ref={canvasRef}
+          style={{
+            width: "min(100vw, calc(100dvh * 0.5625))",
+            height: "min(100dvh, calc(100vw * 1.7777))",
+            imageRendering: "pixelated",
+            background: "#3e8a3a",
+          }}
+        />
+      </div>
+
+      {/* Top bar — title + HP + inventory */}
+      <div className="absolute top-0 left-0 right-0 px-3 pt-3 flex flex-col gap-2 pointer-events-none z-30">
+        <div className="flex items-center justify-between">
+          <div className="text-white text-sm font-bold tracking-wider drop-shadow">STAND TEST</div>
+          <div className="flex items-center gap-1 pointer-events-auto flex-wrap justify-end max-w-[70%]">
+            <button
+              onClick={() => setInventoryOpen(true)}
+              className="bg-black/70 border border-white/40 rounded px-2 py-1 flex items-center gap-1 text-white text-[11px] font-bold"
+              title="Open Inventory"
+            >
+              <span>🎒</span>
+              <span>INV</span>
+              {(ui.arrows + ui.discs + ui.requiemArrows + ui.bluePebbles + ui.tonthCopies + ui.strangeHats + ui.greenArrows + ui.greenBabies) > 0 && (
+                <span className="ml-0.5 px-1 rounded bg-white/20 text-[9px]">
+                  {ui.arrows + ui.discs + ui.requiemArrows + ui.bluePebbles + ui.tonthCopies + ui.strangeHats + ui.greenArrows + ui.greenBabies}
+                </span>
+              )}
+            </button>
+            <button
+              onClick={() => { const n = !soundOn; setSoundOn(n); setSoundEnabled(n); applyMusicSetting(n); }}
+              className="bg-black/60 border border-white/30 rounded px-1.5 py-1 text-white text-[10px]"
+              title="Toggle sound"
+            >
+              {soundOn ? "🔊" : "🔇"}
+            </button>
+            <button
+              onClick={onSave}
+              className="bg-black/60 border border-white/30 rounded px-1.5 py-1 text-white text-[10px]"
+              title="Save game"
+            >S</button>
+            <button
+              onClick={onLoad}
+              className="bg-black/60 border border-white/30 rounded px-1.5 py-1 text-white text-[10px]"
+              title="Load saved game"
+            >L</button>
+          </div>
+        </div>
+        {/* HP bar */}
+        <div className="bg-black/60 border border-white/30 rounded h-3 overflow-hidden w-40">
+          <div
+            className="h-full transition-[width]"
+            style={{
+              width: `${(ui.hp / ui.maxHp) * 100}%`,
+              background: ui.hp / ui.maxHp > 0.5 ? "#5fd16a" : ui.hp / ui.maxHp > 0.25 ? "#e0c34a" : "#d04848",
+            }}
+          />
+        </div>
+        {/* Kill counter */}
+        <div className="text-[10px] text-white/80 self-start">Kills: {ui.kills}</div>
+        {/* Stand label */}
+        <div
+          className="text-xs px-2 py-0.5 rounded self-start font-bold"
+          style={{ background: "rgba(0,0,0,0.6)", color: standColor, border: `1px solid ${standColor}` }}
+        >
+          {stand.name}{ui.standId === "echoes" && ui.shitVariant ? " (S.H.I.T.)" : ""}
+        </div>
+        {/* Piloting chip — under the stand name (per user spec) */}
+        {ui.pilotActive && (
+          <div className="px-2 py-0.5 rounded text-[10px] font-bold self-start"
+               style={{ background: "rgba(0,0,0,0.7)", color: standColor, border: `1px solid ${standColor}` }}>
+            🎮 PILOTING
+          </div>
+        )}
+        {ui.standId === "ebony_devil" && (
+          <div className="bg-black/60 border border-white/30 rounded h-2 overflow-hidden w-32">
+            <div
+              className="h-full transition-[width]"
+              style={{ width: `${ui.rage}%`, background: ui.rageActive ? "#ff3d3d" : "#d04848" }}
+            />
+          </div>
+        )}
+        {ui.standId === "purple_haze" && ui.cleanslyActive && (
+          <div className="flex items-center gap-1 self-start">
+            <div className="bg-black/60 border border-white/30 rounded h-2 overflow-hidden w-32">
+              <div className="h-full transition-[width]" style={{ width: `${ui.cleanslyFrac * 100}%`, background: "#ff6bd1" }} />
+            </div>
+            <span className="text-[9px] text-white/80 font-bold">VIOLENCE</span>
+          </div>
+        )}
+        {ui.standId === "white_album" && (
+          <div className="flex items-center gap-1 self-start">
+            <div className="bg-black/60 border border-white/30 rounded h-2 overflow-hidden w-32">
+              <div
+                className="h-full transition-[width]"
+                style={{
+                  width: `${ui.whiteAlbumBar}%`,
+                  background: ui.whiteAlbumActive ? "#bff5ff" : "#5b6a8c",
+                }}
+              />
+            </div>
+            <span className="text-[9px] text-white/80 font-bold">
+              {ui.whiteAlbumActive ? "SUIT" : "COOL"}
+            </span>
+          </div>
+        )}
+      </div>
+
+      {/* Banners — only show the most-recent meaningful banner. Toasts (item pickups) replace this stack. */}
+      {(ui.toast || ui.banners.length > 0) && (
+        <div className="absolute left-0 right-0 flex flex-col items-center pointer-events-none" style={{ top: 64 }}>
+          <div
+            className="px-2 py-0.5 rounded text-[10px] font-bold leading-tight"
+            style={{ background: "rgba(0,0,0,0.78)", color: standColor, border: `1px solid ${standColor}` }}
+          >
+            {ui.toast ?? ui.banners[ui.banners.length - 1]?.text}
+          </div>
+        </div>
+      )}
+
+      {/* Bag hint — 10s arrow toward INV button for new players */}
+      {Date.now() < bagHintUntil && !inventoryOpen && (
+        <div className="absolute z-40 pointer-events-none" style={{ top: 38, right: 8 }}>
+          <div className="flex flex-col items-end animate-pulse">
+            <div className="text-[10px] font-bold text-white bg-black/80 border border-yellow-300 rounded px-2 py-1 mb-1">
+              Tap 🎒 INV — items, map &amp; help!
+            </div>
+            <div style={{ fontSize: 22, color: "#ffd24a", lineHeight: 1 }}>↑</div>
+          </div>
+        </div>
+      )}
+
+      {/* Joystick area (left half, bottom) */}
+      <div
+        className="absolute left-0 bottom-0 w-1/2 h-1/2"
+        style={{ touchAction: "none" }}
+        onPointerDown={onJoyStart}
+        onPointerMove={onJoyMove}
+        onPointerUp={onJoyEnd}
+        onPointerCancel={onJoyEnd}
+      >
+        {joyRef.current.active && (
+          <>
+            <div
+              className="absolute rounded-full border-2 border-white/40 bg-white/10"
+              style={{
+                width: 110, height: 110,
+                left: joyRef.current.baseX - 55,
+                top: joyRef.current.baseY - 55,
+                pointerEvents: "none",
+              }}
+            />
+            <div
+              className="absolute rounded-full bg-white/60"
+              style={{
+                width: 50, height: 50,
+                left: joyRef.current.baseX - 25 + inputRef.current.joy.x * 30,
+                top: joyRef.current.baseY - 25 + inputRef.current.joy.y * 30,
+                pointerEvents: "none",
+              }}
+            />
+          </>
+        )}
+      </div>
+
+      {/* Aim area: drag the right half to aim; buttons use this direction, otherwise auto-aim picks a nearby target. */}
+      <div
+        className="absolute right-0 top-0 w-1/2 h-full z-10"
+        style={{ touchAction: "none" }}
+        onPointerDown={onAimStart}
+        onPointerMove={onAimMove}
+        onPointerUp={onAimEnd}
+        onPointerCancel={onAimEnd}
+      />
+
+      {/* Ability buttons (right side) */}
+      <div className="absolute right-2 bottom-3 flex flex-col items-end gap-2 pointer-events-none z-20">
+        <div className="flex gap-2 relative">
+          <AbilityBtn label="1" name={abilities.a1.name} damage={abilities.a1.damage} color={abilities.a1.color} cdFrac={cdFrac("a1")} disabled={ui.standId === "none" || abilities.a1.name === "-"} onPress={press("a1")} />
+          <AbilityBtn label="2" name={abilities.a2.name} damage={abilities.a2.damage} color={abilities.a2.color} cdFrac={cdFrac("a2")} disabled={ui.standId === "none" || abilities.a2.name === "-"} onPress={press("a2")} />
+          {ui.standId === "sptw" && ui.sptwRage >= 100 && (
+            <button
+              onClick={onPressRage}
+              className="absolute inset-0 rounded-md font-bold text-black pointer-events-auto"
+              style={{
+                background: "linear-gradient(135deg,#5fe8ff,#a06bff)",
+                border: "2px solid #fff",
+                boxShadow: "0 0 14px rgba(95,232,255,0.8)",
+                animation: "pulse 1s infinite",
+              }}
+            >
+              ⚡ RAGE
+            </button>
+          )}
+        </div>
+        <div className="flex gap-2">
+          <AbilityBtn label="3" name={abilities.a3.name} damage={abilities.a3.damage} color={abilities.a3.color} cdFrac={cdFrac("a3")} disabled={ui.standId === "none" || abilities.a3.name === "-"} onPress={press("a3")} />
+          <AbilityBtn label="4" name={abilities.a4.name} damage={abilities.a4.damage} color={abilities.a4.color} cdFrac={cdFrac("a4")} disabled={ui.standId === "none" || abilities.a4.name === "-" || (ui.standId === "ebony_devil" && ui.rage < 100 && !ui.rageActive)} onPress={press("a4")} />
+        </div>
+        <AbilityBtn label="M1" name={abilities.m1.name} damage={abilities.m1.damage} color={abilities.m1.color} cdFrac={cdFrac("m1")} big onPress={press("m1")} onHoldStart={m1HoldStart} onHoldEnd={m1HoldEnd} />
+        {(ui.standId === "whitesnake" || ui.standId === "c_moon") && (
+          <button
+            onClick={onPrimeHeal}
+            className="bg-black/75 border rounded px-2 py-1 text-white text-[10px] font-bold pointer-events-auto"
+            style={{ borderColor: ui.standId === "c_moon" ? "#d6c5ff" : "#bff0c8", color: ui.standId === "c_moon" ? "#d6c5ff" : "#bff0c8", touchAction: "none" }}
+            title="Prime Heal (P)"
+          >
+            Prime Heal (P)
+          </button>
+        )}
+        {ui.standId === "sptw" && ui.sptwRage < 100 && ui.sptwRage > 0 && (
+          <div className="pointer-events-none bg-black/60 border border-white/30 rounded h-2 overflow-hidden w-20">
+            <div className="h-full" style={{ width: `${ui.sptwRage}%`, background: "#5fe8ff" }} />
+          </div>
+        )}
+        {ui.standId !== "none" && (
+          <button
+            onClick={onToggleStand}
+            className="bg-black/70 border border-white/40 rounded px-2 py-1 text-white text-[10px] pointer-events-auto"
+            style={{ touchAction: "none" }}
+          >
+            Stand: ON/OFF
+          </button>
+        )}
+      </div>
+
+      {/* Time Stop banner — top center */}
+      {ui.timeStopActive && (
+        <div className="absolute top-2 left-1/2 -translate-x-1/2 z-30 pointer-events-none">
+          <div className="px-3 py-1 rounded text-xs font-bold"
+               style={{ background: "rgba(0,0,0,0.78)", color: "#dcd6ff", border: "1px solid #dcd6ff" }}>
+            ⏱ TIME STOPPED
+          </div>
+        </div>
+      )}
+
+      {/* Shard picker (Hanged Man teleport) */}
+      {ui.shardPickerOpen && worldRef.current && (
+        <div className="absolute inset-0 bg-black/60 z-40 flex items-center justify-center p-6"
+             onClick={() => { if (worldRef.current) closeShardPicker(worldRef.current); }}>
+          <div className="bg-black/80 border border-white/40 rounded p-4 max-w-xs w-full"
+               onClick={(e) => e.stopPropagation()}>
+            <div className="text-white text-sm font-bold mb-2">Teleport to shard</div>
+            {ui.shards.length === 0 ? (
+              <div className="text-white/70 text-xs">No active shards.</div>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {ui.shards.map((s, i) => (
+                  <button
+                    key={s.id}
+                    onClick={() => { if (worldRef.current) teleportToShard(worldRef.current, s.id); }}
+                    className="bg-white/10 hover:bg-white/20 border border-white/30 rounded px-3 py-2 text-white text-xs text-left"
+                  >
+                    Shard #{i + 1} — ({Math.round(s.pos.x)}, {Math.round(s.pos.y)})
+                  </button>
+                ))}
+              </div>
+            )}
+            <button
+              onClick={() => { if (worldRef.current) closeShardPicker(worldRef.current); }}
+              className="mt-3 w-full bg-white/10 border border-white/30 rounded px-3 py-1 text-white text-xs"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+      {/* Boingo proximity prompt */}
+      {ui.boingoNearby && !boingoOpen && (
+        <div className="absolute left-1/2 -translate-x-1/2 bottom-[40%] z-30 pointer-events-auto">
+          <button
+            onClick={onTalkBoingo}
+            className="px-3 py-1.5 rounded-md text-[11px] font-bold text-white animate-pulse"
+            style={{
+              background: "linear-gradient(180deg, #3a1a5a, #1a0a2a)",
+              border: "2px solid #ba8cff",
+              boxShadow: "0 0 12px rgba(186,140,255,0.6)",
+            }}
+          >
+            📖 Talk to Boingo
+          </button>
+        </div>
+      )}
+
+      {/* Boingo modal — purple book of prophecy */}
+      {boingoOpen && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center p-4 pointer-events-auto"
+          style={{ background: "rgba(8,4,18,0.85)" }}
+          onClick={() => setBoingoOpen(false)}
+        >
+          <div
+            className="relative max-w-sm w-full rounded-lg overflow-hidden"
+            style={{
+              background: "linear-gradient(180deg,#2a0e4a 0%,#1a0930 100%)",
+              border: "3px solid #ba8cff",
+              boxShadow: "0 0 24px rgba(186,140,255,0.5), inset 0 0 24px rgba(60,20,120,0.6)",
+              fontFamily: "monospace",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            {/* Book spine accent */}
+            <div
+              className="absolute left-0 top-0 bottom-0 w-2"
+              style={{ background: "linear-gradient(180deg,#ba8cff,#5a2c8a)" }}
+            />
+            {/* Header */}
+            <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-purple-300/30">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">📖</span>
+                <div>
+                  <div className="text-[10px] text-purple-200/70 tracking-widest">BOINGO'S BOOK</div>
+                  <div className="text-sm font-bold text-purple-100">Prophecies & Pointers</div>
+                </div>
+              </div>
+              <button
+                onClick={() => setBoingoOpen(false)}
+                className="text-purple-200/70 hover:text-white text-lg leading-none px-1"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Page tabs */}
+            <div className="px-4 pt-2 flex gap-1">
+              {[1, 2].map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setBookPage(p as 1 | 2)}
+                  className="px-2 py-0.5 rounded text-[10px] font-bold"
+                  style={{
+                    background: bookPage === p ? "#5a2c8a" : "rgba(0,0,0,0.35)",
+                    border: "1px solid #ba8cff",
+                    color: "#fff",
+                  }}
+                >
+                  PAGE {p}
+                </button>
+              ))}
+            </div>
+
+            <div className="px-4 py-3 max-h-[70vh] overflow-y-auto text-[11px] text-purple-50/95 leading-relaxed">
+              {bookPage === 1 && (
+                <>
+                  {/* Boingo speech */}
+                  <div
+                    className="rounded-md px-3 py-2 mb-3"
+                    style={{ background: "rgba(186,140,255,0.12)", border: "1px dashed rgba(186,140,255,0.4)" }}
+                  >
+                    <div className="text-[10px] font-bold text-purple-200/80 mb-1">Boingo says…</div>
+                    <div className="italic text-purple-100/90">
+                      "M-my book showed me you'd come… here, this is how you survive!"
+                    </div>
+                  </div>
+
+                  {/* Basics */}
+                  <div className="mb-3">
+                    <div className="text-[10px] font-bold tracking-widest text-purple-200/80 mb-1">★ BASICS</div>
+                    <ul className="space-y-0.5">
+                      <li>• Drag the LEFT half to move (or WASD).</li>
+                      <li>• Drag the RIGHT half to aim. Release to auto-aim.</li>
+                      <li>• Tap M1 / 1-4 (or Space, 1-4) to attack.</li>
+                      <li>• Hold M1 to auto-repeat.</li>
+                      <li>• Open <span className="font-bold">🎒 INV</span> to use Arrows / DISCs / Pebbles / Tonth.</li>
+                      <li>• <span style={{ color: "#cfd2d8" }}>DISCs</span> remove your current stand (use one before swapping with an Arrow).</li>
+                      <li>• Hostile NPCs (red) only attack if provoked.</li>
+                    </ul>
+                  </div>
+
+                  {/* Current stand details */}
+                  {ui.standId !== "none" && STAND_CODEX[ui.standId as Exclude<typeof ui.standId, "none">] && (
+                    <div className="mb-3">
+                      <div className="text-[10px] font-bold tracking-widest text-purple-200/80 mb-1">
+                        ★ YOUR STAND — <span style={{ color: standColor }}>{stand.name}</span>
+                      </div>
+                      <div
+                        className="rounded-md px-3 py-2 mb-2"
+                        style={{ background: "rgba(0,0,0,0.35)", border: `1px solid ${standColor}55` }}
+                      >
+                        <div className="text-[10px] italic text-purple-200/80 mb-1">
+                          {STAND_CODEX[ui.standId as Exclude<typeof ui.standId, "none">].model.description}
+                        </div>
+                      </div>
+                      <ul className="space-y-1">
+                        {(["m1", "a1", "a2", "a3", "a4"] as const).map((k) => {
+                          const ab = abilities[k];
+                          const codexNote =
+                            STAND_CODEX[ui.standId as Exclude<typeof ui.standId, "none">].moves[k].notes;
+                          return (
+                            <li key={k} className="flex gap-2">
+                              <span
+                                className="font-bold w-7 text-center rounded text-[10px] py-0.5 shrink-0"
+                                style={{ background: `${ab.color}33`, color: ab.color, border: `1px solid ${ab.color}66` }}
+                              >
+                                {k.toUpperCase()}
+                              </span>
+                              <div>
+                                <div className="font-bold text-purple-100">
+                                  {ab.name}
+                                  {ab.damage > 0 && (
+                                    <span className="text-purple-200/60 font-normal"> · {ab.damage} dmg</span>
+                                  )}
+                                  {ab.cooldown > 0 && (
+                                    <span className="text-purple-200/60 font-normal"> · {ab.cooldown}s</span>
+                                  )}
+                                </div>
+                                <div className="text-purple-200/80 text-[10px]">{codexNote}</div>
+                              </div>
+                            </li>
+                          );
+                        })}
+                      </ul>
+                    </div>
+                  )}
+
+                  {ui.standId === "none" && (
+                    <div
+                      className="rounded-md px-3 py-2"
+                      style={{ background: "rgba(0,0,0,0.35)", border: "1px solid rgba(186,140,255,0.4)" }}
+                    >
+                      <div className="text-[10px] font-bold text-purple-200/80 mb-1">★ NO STAND YET</div>
+                      <div>
+                        Open <span className="font-bold">🎒 INV</span> and use a glowing
+                        <span style={{ color: "#caa14a" }}> Arrow</span> to roll for a stand!
+                      </div>
+                    </div>
+                  )}
+                </>
+              )}
+
+              {bookPage === 2 && (
+                <>
+                  <div className="text-[10px] font-bold tracking-widest text-purple-200/80 mb-2">★ STAND CATALOG</div>
+                  {(() => {
+                    const tierOrder: { tier: StandRarity; label: string; subtitle: string }[] = [
+                      { tier: "common", label: "COMMON", subtitle: `${TIER_BASE_PCT.common}%` },
+                      { tier: "uncommon", label: "UNCOMMON", subtitle: `${TIER_BASE_PCT.uncommon}%` },
+                      { tier: "rare", label: "RARE", subtitle: `${TIER_BASE_PCT.rare}%` },
+                      { tier: "epic", label: "EPIC", subtitle: `${TIER_BASE_PCT.epic}%` },
+                      { tier: "legendary", label: "LEGENDARY (ITEM REQUIRED)", subtitle: "item-only" },
+                      { tier: "pebble", label: "BPE (BLUE-PEBBLE EXCLUSIVE)", subtitle: "item-only" },
+                      { tier: "wip", label: "W.I.P (WORK-IN-PROGRESS)", subtitle: "will rotate out" },
+                    ];
+                    const unlocked = new Set(ui.standsUnlocked ?? []);
+                    return (
+                      <div className="space-y-3">
+                        {tierOrder.map(({ tier, label, subtitle }) => {
+                          const stands = (Object.keys(STANDS) as (keyof typeof STANDS)[])
+                            .filter((id) => id !== "none" && STANDS[id].rarity === tier);
+                          if (stands.length === 0) return null;
+                          return (
+                            <div key={tier}>
+                              <div className="flex items-center justify-between mb-1">
+                                <span className="text-[10px] font-bold tracking-widest text-purple-200">{label}</span>
+                                <span className="text-[10px] text-purple-200/70">{subtitle}</span>
+                              </div>
+                              <ul className="space-y-1">
+                                {stands.map((id) => {
+                                  const s = STANDS[id];
+                                  const pct = standRollPct(id);
+                                  const isUnlocked = unlocked.has(id);
+                                  const display = isUnlocked ? s.name : "???";
+                                  const swatch = isUnlocked ? s.color : "#444";
+                                  const pctStr = pct > 0 ? pct.toFixed(1) + "%" : (tier === "pebble" || tier === "legendary" || tier === "wip" ? "—" : "—");
+                                  return (
+                                    <li
+                                      key={id}
+                                      className="flex items-center gap-2 rounded px-2 py-1"
+                                      style={{ background: "rgba(0,0,0,0.3)", border: `1px solid ${swatch}55` }}
+                                    >
+                                      <span
+                                        className="inline-block rounded-full shrink-0"
+                                        style={{
+                                          width: 14, height: 14,
+                                          background: swatch,
+                                          boxShadow: isUnlocked ? `0 0 6px ${swatch}, 0 0 12px ${swatch}66` : "none",
+                                          border: "1px solid rgba(255,255,255,0.4)",
+                                        }}
+                                      />
+                                      <span className="font-bold flex-1" style={{ color: swatch }}>{display}</span>
+                                      <span className="text-[10px] text-purple-200/70 w-14 text-right">{pctStr}</span>
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    );
+                  })()}
+                  <div className="mt-2 text-[9px] text-purple-200/60 italic">
+                    Names appear once you've equipped a stand at least once.
+                  </div>
+                </>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div className="px-4 py-2 border-t border-purple-300/30 flex justify-between items-center">
+              <span className="text-[9px] text-purple-200/60 italic">Page rustles strangely…</span>
+              <button
+                onClick={() => setBoingoOpen(false)}
+                className="px-3 py-1 rounded text-[10px] font-bold text-white"
+                style={{ background: "#5a2c8a", border: "1px solid #ba8cff" }}
+              >
+                Close book
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Inventory modal */}
+      {inventoryOpen && (
+        <div
+          className="absolute inset-0 z-50 flex items-center justify-center p-4 pointer-events-auto"
+          style={{ background: "rgba(0,0,0,0.78)" }}
+          onClick={() => setInventoryOpen(false)}
+        >
+          <div
+            className="relative max-w-sm w-full rounded-lg overflow-hidden"
+            style={{
+              background: "linear-gradient(180deg,#1a1a22 0%,#0d0d12 100%)",
+              border: "2px solid rgba(255,255,255,0.35)",
+              boxShadow: "0 0 24px rgba(0,0,0,0.7)",
+              fontFamily: "monospace",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between px-4 pt-3 pb-2 border-b border-white/20">
+              <div className="flex items-center gap-2">
+                <span className="text-2xl">🎒</span>
+                <div>
+                  <div className="text-[10px] text-white/60 tracking-widest">INVENTORY</div>
+                  <div className="text-sm font-bold text-white">
+                    {invTab === "items" && "Items & Tools"}
+                    {invTab === "map" && "Mini Map"}
+                    {invTab === "howto" && "How to Play"}
+                    {invTab === "changelog" && "Change Log"}
+                  </div>
+                </div>
+              </div>
+              <button
+                onClick={() => setInventoryOpen(false)}
+                className="text-white/70 hover:text-white text-lg leading-none px-1"
+                aria-label="Close"
+              >
+                ✕
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="px-3 pt-2 flex gap-1 flex-wrap">
+              {([
+                ["items", "ITEMS"],
+                ["map", "MAP"],
+                ["howto", "HELP"],
+                ["changelog", "LOG"],
+              ] as const).map(([key, label]) => (
+                <button
+                  key={key}
+                  onClick={() => setInvTab(key)}
+                  className="px-2 py-0.5 rounded text-[10px] font-bold"
+                  style={{
+                    background: invTab === key ? "rgba(255,255,255,0.2)" : "rgba(0,0,0,0.4)",
+                    border: "1px solid rgba(255,255,255,0.4)",
+                    color: "#fff",
+                  }}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+
+            {invTab === "items" && (
+              <div className="p-3 grid grid-cols-2 gap-2 text-[11px] text-white">
+                <InvSlot
+                  icon={<span style={{ color: "#caa14a", fontSize: 18 }}>➤</span>}
+                  name="Arrow"
+                  count={ui.arrows}
+                  desc="Roll a random stand. Need empty stand slot."
+                  color="#caa14a"
+                  disabledReason={ui.standId !== "none" ? "Use a DISC first" : undefined}
+                  onUse={() => { onUseArrow(); }}
+                />
+                <InvSlot
+                  icon={<span style={{ color: "#cfd2d8", fontSize: 18 }}>◎</span>}
+                  name="DISC"
+                  count={ui.discs}
+                  desc="Remove your current stand."
+                  color="#cfd2d8"
+                  disabledReason={ui.standId === "none" ? "No stand equipped" : undefined}
+                  onUse={() => { onUseDisc(); }}
+                />
+                <InvSlot
+                  icon={<span style={{ color: "#ffd24a", fontSize: 18 }}>✦</span>}
+                  name="Requiem Arrow"
+                  count={ui.requiemArrows}
+                  desc="Evolves Gold Experience into GER."
+                  color="#ffd24a"
+                  disabledReason={ui.standId !== "gold_experience" ? "Only Gold Experience can use this" : undefined}
+                  onUse={() => { onUseRequiem(); }}
+                />
+                <InvSlot
+                  icon={<span style={{ color: "#4a86d6", fontSize: 18 }}>●</span>}
+                  name="Blue Pebble"
+                  count={ui.bluePebbles}
+                  desc="Grants Moon Rabbit. Need empty stand slot."
+                  color="#4a86d6"
+                  disabledReason={ui.standId !== "none" ? "Use a DISC first" : undefined}
+                  onUse={() => { onUsePebble(); }}
+                />
+                <InvSlot
+                  icon={<span style={{ color: "#ba8cff", fontSize: 18 }}>📖</span>}
+                  name="Tonth Copy"
+                  count={ui.tonthCopies}
+                  desc="Open the book of stands."
+                  color="#ba8cff"
+                  onUse={() => { onUseTonth(); setInventoryOpen(false); }}
+                />
+                {ui.strangeHats > 0 && (
+                  <InvSlot
+                    icon={<span style={{ color: "#5fe8ff", fontSize: 18 }}>🎩</span>}
+                    name="Strange Black Hat"
+                    count={ui.strangeHats}
+                    desc="Awakens Star Platinum's true form."
+                    color="#5fe8ff"
+                    disabledReason={ui.standId !== "star_platinum" ? "Need Star Platinum equipped" : undefined}
+                    onUse={() => { onUseStrangeHat(); setInventoryOpen(false); }}
+                  />
+                )}
+                {ui.greenArrows > 0 && (
+                  <InvSlot
+                    icon={<span style={{ color: "#5fe88a", fontSize: 18 }}>➶</span>}
+                    name="Green W.I.P. Arrow"
+                    count={ui.greenArrows}
+                    desc="Always rolls Whitesnake."
+                    color="#5fe88a"
+                    disabledReason={ui.standId !== "none" ? "Use a DISC first" : undefined}
+                    onUse={() => { onUseGreenArrow(); }}
+                  />
+                )}
+                {ui.greenBabies > 0 && (
+                  <InvSlot
+                    icon={<span style={{ color: "#a8e6a8", fontSize: 18 }}>👶</span>}
+                    name="Green Baby"
+                    count={ui.greenBabies}
+                    desc="Evolves Whitesnake into C-MOON."
+                    color="#a8e6a8"
+                    disabledReason={ui.standId !== "whitesnake" ? "Need Whitesnake equipped" : undefined}
+                    onUse={() => { onUseGreenBaby(); }}
+                  />
+                )}
+              </div>
+            )}
+
+            {invTab === "map" && (
+              <div className="p-3 text-[10px] text-white">
+                <MiniMap world={worldRef.current} />
+                <div className="mt-2 grid grid-cols-2 gap-x-3 gap-y-1 text-[10px]">
+                  <LegendDot color="#5fe8ff" label="You" />
+                  <LegendDot color="#5fd16a" label="Neutral NPC" />
+                  <LegendDot color="#d04848" label="Hostile NPC" />
+                  <LegendDot color="#caa14a" label="Arrow" />
+                  <LegendDot color="#cfd2d8" label="DISC" />
+                  <LegendDot color="#ffd24a" label="Requiem Arrow" />
+                  <LegendDot color="#4a86d6" label="Blue Pebble" />
+                  <LegendDot color="#ba8cff" label="Boingo" />
+                </div>
+                <div className="mt-2 text-white/60 text-[9px]">
+                  Shows a wide area around you. Edges clamp at the world border.
+                </div>
+              </div>
+            )}
+
+            {invTab === "howto" && (
+              <div className="p-3 text-[11px] text-white space-y-1 max-h-[60vh] overflow-y-auto">
+                <div className="font-bold text-sm mb-1">How to Play</div>
+                <div>• Drag the LEFT half to move (or WASD).</div>
+                <div>• Drag the RIGHT half to aim. Release to auto-aim.</div>
+                <div>• Tap M1 / 1-4 to attack (Space or 1-4 on keyboard). Hold M1 to auto-repeat.</div>
+                <div>• M1 auto-aims at the closest NPC. 1-4 lock onto the closest enemy.</div>
+                <div>• Pick up <span style={{ color: "#caa14a" }}>Arrows</span> to roll a stand. <span style={{ color: "#cfd2d8" }}>DISCs</span> remove your stand.</div>
+                <div>• <span style={{ color: "#ffd24a" }}>Requiem Arrows</span> only work on Gold Experience.</div>
+                <div>• Tap "Stand: ON/OFF" to dismiss/resummon your stand.</div>
+                <div>• Whitesnake / C-MOON: press <b>P</b> or Prime Heal to trigger the 9-prime heal sequence.</div>
+                <div>• Hostile NPCs (red) only attack after you provoke them. You slowly regen out of combat.</div>
+                <div>• Find <span style={{ color: "#ba8cff" }}>Boingo</span> to get a Tonth Copy (full stand catalog).</div>
+              </div>
+            )}
+
+            {invTab === "changelog" && (
+              <div className="p-3 text-[11px] text-white space-y-2 max-h-[60vh] overflow-y-auto">
+                <div className="font-bold text-sm mb-1">Change Log</div>
+                <ChangelogEntry version="v1.0" title="Whitesnake / C-Moon Pass">
+                  <li>New stand: <b>Whitesnake</b> — Improvisation (3 bullets), DISC Steal, Acidic Stab (bleed), Hypnotic Spit (12s stun).</li>
+                  <li>New stand: <b>C-Moon</b> — Punishment gravity bubble (140r, 8s, 18 dmg on end).</li>
+                  <li>Prime-number heal is now player-triggered (P / Prime Heal), heals through 2,3,5,7,11,13,17,19,23, then wears off.</li>
+                  <li>Autosave on tab hide / page unload + auto-load on boot.</li>
+                </ChangelogEntry>
+                <ChangelogEntry version="v0.9" title="Inventory Overhaul">
+                  <li>Tabbed inventory: Items, Mini Map, How to Play, Change Log.</li>
+                  <li>Mini map with player / NPC / item icons + legend.</li>
+                  <li>Requiem Arrow gating fixed — usable on Gold Experience.</li>
+                  <li>Ground destruction: NPC death scars the ground (excl. Hanged Man, Harvest, Ebony Devil, Moon Rabbit).</li>
+                  <li>10s onboarding hint pointing at the bag icon.</li>
+                </ChangelogEntry>
+                <ChangelogEntry version="v0.8" title="Stand Overhaul">
+                  <li>GER added. Return-to-Zero passive, Life Beam, Truth Punch, Triple Loop.</li>
+                  <li>SPTW: Rage button now overlays A1+A2, blue eye-flow VFX, 10s duration.</li>
+                  <li>SPTW A2 redesigned to triple-pebble click charges.</li>
+                  <li>Echoes: Japanese-glyph rework (ゴゴゴ / ドドド / ピピピ / ズキューン).</li>
+                  <li>RHCP: Cable Dash, Ground Bomber knockback + fading craters.</li>
+                  <li>NPC HP buffed; DISC spawns rebalanced; map-center spawn anchors.</li>
+                </ChangelogEntry>
+                <ChangelogEntry version="v0.7" title="Polish Pass">
+                  <li>Fixed time-stop banner placement (top-center).</li>
+                  <li>Strange Hat remodelled (cap + gold palm box).</li>
+                  <li>Requiem Arrow: 1-in-world cap, beetle silhouette on head.</li>
+                </ChangelogEntry>
+              </div>
+            )}
+
+            <div className="px-4 py-2 border-t border-white/20 flex justify-end">
+              <button
+                onClick={() => setInventoryOpen(false)}
+                className="px-3 py-1 rounded text-[10px] font-bold text-white bg-white/10 border border-white/30"
+              >
+                Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AbilityBtn({
+  label, name, damage, color, cdFrac, onPress, disabled, big, onHoldStart, onHoldEnd,
+}: {
+  label: string;
+  name: string;
+  damage: number;
+  color: string;
+  cdFrac: number;
+  onPress: () => void;
+  disabled?: boolean;
+  big?: boolean;
+  onHoldStart?: () => void;
+  onHoldEnd?: () => void;
+}) {
+  const size = big ? 76 : 56;
+  const tag = damage > 0 ? `${damage}` : name.toLowerCase().includes("heal") ? "HEAL" : name.toLowerCase().includes("rage") ? "BUFF" : name.toLowerCase().includes("veil") ? "BUFF" : name.toLowerCase().includes("pilot") || name.toLowerCase().includes("carry") || name.toLowerCase().includes("gather") ? "TOG" : "UTIL";
+  return (
+    <button
+      onPointerDown={(e) => { e.preventDefault(); if (disabled) return; onPress(); onHoldStart?.(); }}
+      onPointerUp={() => { onHoldEnd?.(); }}
+      onPointerCancel={() => { onHoldEnd?.(); }}
+      onPointerLeave={() => { onHoldEnd?.(); }}
+      disabled={disabled}
+      className="relative rounded-full flex flex-col items-center justify-center font-bold text-white pointer-events-auto"
+      style={{
+        width: size, height: size,
+        background: disabled ? "rgba(60,60,60,0.5)" : `radial-gradient(circle, ${color}66, rgba(0,0,0,0.7))`,
+        border: `2px solid ${disabled ? "rgba(255,255,255,0.2)" : color}`,
+        opacity: disabled ? 0.5 : 1,
+        touchAction: "none",
+        WebkitUserSelect: "none",
+      }}
+    >
+      <span style={{ fontSize: big ? 16 : 14 }}>{label}</span>
+      <span style={{ fontSize: 8, opacity: 0.85, lineHeight: 1, marginTop: 2, maxWidth: size - 8, textAlign: "center" }}>
+        {disabled ? "—" : tag}
+      </span>
+      {/* Cooldown overlay */}
+      {cdFrac > 0 && (
+        <div
+          className="absolute inset-0 rounded-full"
+          style={{
+            background: `conic-gradient(rgba(0,0,0,0.65) ${cdFrac * 360}deg, transparent 0deg)`,
+            pointerEvents: "none",
+          }}
+        />
+      )}
+    </button>
+  );
+}
+
+function InvSlot({
+  icon, name, count, desc, color, onUse, disabledReason,
+}: {
+  icon: ReactNode;
+  name: string;
+  count: number;
+  desc: string;
+  color: string;
+  onUse: () => void;
+  disabledReason?: string;
+}) {
+  const empty = count <= 0;
+  const locked = !!disabledReason;
+  const disabled = empty || locked;
+  return (
+    <button
+      onClick={onUse}
+      disabled={disabled}
+      title={disabledReason}
+      className="flex flex-col items-start text-left rounded p-2 gap-1"
+      style={{
+        background: disabled ? "rgba(255,255,255,0.04)" : "rgba(0,0,0,0.45)",
+        border: `1px solid ${disabled ? "rgba(255,255,255,0.15)" : color + "88"}`,
+        opacity: disabled ? 0.45 : 1,
+        cursor: disabled ? "not-allowed" : "pointer",
+      }}
+    >
+      <div className="flex items-center justify-between w-full">
+        <div className="flex items-center gap-1">
+          {icon}
+          <span className="font-bold" style={{ color }}>{name}</span>
+        </div>
+        <span className="text-[10px] px-1.5 py-0.5 rounded bg-white/10">×{count}</span>
+      </div>
+      <div className="text-[9px] text-white/70 leading-tight">{locked ? disabledReason : desc}</div>
+    </button>
+  );
+}
+
+function LegendDot({ color, label }: { color: string; label: string }) {
+  return (
+    <div className="flex items-center gap-1">
+      <span
+        style={{
+          width: 8,
+          height: 8,
+          background: color,
+          borderRadius: 1,
+          border: "1px solid rgba(255,255,255,0.4)",
+          display: "inline-block",
+        }}
+      />
+      <span className="text-white/85">{label}</span>
+    </div>
+  );
+}
+
+function ChangelogEntry({
+  version,
+  title,
+  children,
+}: {
+  version: string;
+  title: string;
+  children: ReactNode;
+}) {
+  return (
+    <div className="rounded p-2" style={{ background: "rgba(0,0,0,0.4)", border: "1px solid rgba(255,255,255,0.18)" }}>
+      <div className="flex items-baseline gap-2 mb-1">
+        <span className="text-[10px] font-bold text-yellow-300">{version}</span>
+        <span className="font-bold">{title}</span>
+      </div>
+      <ul className="list-disc list-inside text-[10px] text-white/85 space-y-0.5">{children}</ul>
+    </div>
+  );
+}
+
+interface MiniMapWorld {
+  player: { pos: { x: number; y: number }; facing?: { x: number; y: number } };
+  npcs: Array<{ pos: { x: number; y: number }; alive: boolean; kind: string }>;
+  items: Array<{ pos: { x: number; y: number }; kind: string }>;
+  props?: Array<{ rect: { x: number; y: number; w: number; h: number }; hp?: number }>;
+  boingo?: { pos: { x: number; y: number }; alive: boolean };
+}
+
+function MiniMap({ world }: { world: MiniMapWorld | null }) {
+  const SIZE = 240; // square mini map
+  const RANGE = 900; // half-extent of the wide area shown around player (world units)
+  if (!world) return <div className="text-white/60 text-[10px]">Loading…</div>;
+  const px = world.player.pos.x;
+  const py = world.player.pos.y;
+  // Clamp the view box so it never goes beyond world borders.
+  let vx0 = px - RANGE;
+  let vy0 = py - RANGE;
+  let vx1 = px + RANGE;
+  let vy1 = py + RANGE;
+  if (vx0 < 0) { vx1 -= vx0; vx0 = 0; }
+  if (vy0 < 0) { vy1 -= vy0; vy0 = 0; }
+  if (vx1 > MAP_W) { const d = vx1 - MAP_W; vx0 -= d; vx1 = MAP_W; if (vx0 < 0) vx0 = 0; }
+  if (vy1 > MAP_H) { const d = vy1 - MAP_H; vy0 -= d; vy1 = MAP_H; if (vy0 < 0) vy0 = 0; }
+  const w = vx1 - vx0;
+  const h = vy1 - vy0;
+  const project = (x: number, y: number) => ({
+    x: ((x - vx0) / w) * SIZE,
+    y: ((y - vy0) / h) * SIZE,
+  });
+  const inView = (x: number, y: number) => x >= vx0 && x <= vx1 && y >= vy0 && y <= vy1;
+  const rectProject = (x: number, y: number, rw: number, rh: number) => {
+    const p = project(x, y);
+    return { ...p, w: (rw / w) * SIZE, h: (rh / h) * SIZE };
+  };
+  const itemShape = (color: string, key: string, x: number, y: number, r = 2.3) => {
+    const p = project(x, y);
+    if (p.x < 0 || p.x > SIZE || p.y < 0 || p.y > SIZE) return null;
+    return (
+      <rect key={key} x={p.x - r} y={p.y - r} width={r * 2} height={r * 2} transform={`rotate(45 ${p.x} ${p.y})`} fill={color} stroke="rgba(0,0,0,0.7)" strokeWidth={0.5} />
+    );
+  };
+  const npcShape = (color: string, key: string, x: number, y: number) => {
+    const p = project(x, y);
+    if (p.x < 0 || p.x > SIZE || p.y < 0 || p.y > SIZE) return null;
+    return <rect key={key} x={p.x - 2.2} y={p.y - 2.2} width={4.4} height={4.4} fill={color} stroke="rgba(0,0,0,0.65)" strokeWidth={0.5} />;
+  };
+  const itemColor = (kind: string) => {
+    switch (kind) {
+      case "arrow": return "#caa14a";
+      case "disc": return "#cfd2d8";
+      case "requiem_arrow": return "#ffd24a";
+      case "blue_pebble": return "#4a86d6";
+      case "strange_hat": return "#5fe8ff";
+      case "green_arrow": return "#5fe88a";
+      case "green_baby": return "#a8e6a8";
+      default: return "#fff";
+    }
+  };
+  const player = project(px, py);
+  return (
+    <svg
+      width={SIZE}
+      height={SIZE}
+      style={{
+        background: "#1c2a1c",
+        border: "1px solid rgba(255,255,255,0.4)",
+        borderRadius: 6,
+        display: "block",
+        margin: "0 auto",
+      }}
+    >
+      <defs>
+        <pattern id="minimapGrass" width="10" height="10" patternUnits="userSpaceOnUse">
+          <rect width="10" height="10" fill="#315f2f" />
+          <rect width="5" height="5" fill="#3d7537" />
+          <rect x="5" y="5" width="5" height="5" fill="#3d7537" />
+        </pattern>
+      </defs>
+      <rect x={0} y={0} width={SIZE} height={SIZE} fill="url(#minimapGrass)" />
+      {/* (no roads — the base map doesn't have any) */}
+      {world.props?.filter((p) => (p.hp ?? 1) > 0 && inView(p.rect.x + p.rect.w / 2, p.rect.y + p.rect.h / 2)).slice(0, 90).map((p, i) => {
+        const r = rectProject(p.rect.x, p.rect.y, p.rect.w, p.rect.h);
+        const house = p.rect.w === 110 && p.rect.h === 84;
+        const fence = p.rect.h === 6;
+        const tree = p.rect.w === 20 && p.rect.h === 16;
+        const fill = house ? "#b98c58" : fence ? "#9a7a50" : tree ? "#1f6b32" : "#5c666c";
+        return <rect key={`p${i}`} x={r.x} y={r.y} width={Math.max(1, r.w)} height={Math.max(1, r.h)} fill={fill} opacity={house ? 0.95 : 0.78} />;
+      })}
+      <text x={SIZE - 12} y={15} textAnchor="middle" fontSize="12" fontWeight="bold" fill="#fff">N</text>
+      {/* world-edge indicators (darker bands where view hits the world border) */}
+      {vx0 <= 0 && <rect x={0} y={0} width={2} height={SIZE} fill="rgba(0,0,0,0.6)" />}
+      {vy0 <= 0 && <rect x={0} y={0} width={SIZE} height={2} fill="rgba(0,0,0,0.6)" />}
+      {vx1 >= MAP_W && <rect x={SIZE - 2} y={0} width={2} height={SIZE} fill="rgba(0,0,0,0.6)" />}
+      {vy1 >= MAP_H && <rect x={0} y={SIZE - 2} width={SIZE} height={2} fill="rgba(0,0,0,0.6)" />}
+      {/* items (smaller) */}
+      {world.items.map((it, i) => itemShape(itemColor(it.kind), `i${i}`, it.pos.x, it.pos.y, 1.7))}
+      {/* npcs */}
+      {world.npcs.filter((n) => n.alive).map((n, i) =>
+        npcShape(n.kind === "enemy" ? "#d04848" : "#5fd16a", `n${i}`, n.pos.x, n.pos.y),
+      )}
+      {/* boingo */}
+      {world.boingo?.alive && itemShape("#ba8cff", "boingo", world.boingo.pos.x, world.boingo.pos.y, 2.2)}
+      {/* player on top */}
+      <polygon points={`${player.x},${player.y - 5} ${player.x - 4},${player.y + 4} ${player.x + 4},${player.y + 4}`} fill="#5fe8ff" stroke="#fff" strokeWidth={1} transform={`rotate(${Math.atan2(world.player.facing?.y ?? -1, world.player.facing?.x ?? 0) * 180 / Math.PI + 90} ${player.x} ${player.y})`} />
+    </svg>
+  );
+}
